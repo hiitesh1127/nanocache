@@ -58,6 +58,15 @@ public class ShardedNanoCacheImpl<K, V> implements NanoCache<K, V> {
         segmentFor(key).remove(key);
     }
 
+    @Override
+    public int size() {
+        int total = 0;
+        for (CacheSegment<K, V> segment : segments) {
+            total += segment.size();
+        }
+        return total;
+    }
+
     // Helper to enforce Power of 2
     private int findNextPowerOfTwo(int n) {
         int power = 1;
