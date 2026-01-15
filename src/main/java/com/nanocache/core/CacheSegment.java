@@ -15,7 +15,7 @@ public class CacheSegment<K, V> {
     private final EvictionPolicy<K> policy = new LRUPolicy<>();
     private final int capacity;
 
-    // Advanced Concurrency: StampedLock for optimistic locking
+    // StampedLock for optimistic locking
     private final StampedLock lock = new StampedLock();
 
     public CacheSegment(int capacity) {
@@ -25,16 +25,18 @@ public class CacheSegment<K, V> {
     public void put(K key, V value, long ttlMillis) {
         long stamp = lock.writeLock(); // Exclusive Lock (Blocks everyone)
         try {
-            if(map.size() >= capacity && !map.containsKey(key)) {
+            // Eviction Logic: If full and new key, remove LRU item
+            if (map.size() >= capacity && !map.containsKey(key)) {
                 K victim = policy.evict();
                 if (victim != null) {
-                    map.remove(victim); // Remove from storage
-                    // System.out.println("Evicted: " + victim);
+                    map.remove(victim);
                 }
             }
+
             long expiresAt = System.currentTimeMillis() + ttlMillis;
             map.put(key, new CacheEntry<>(value, expiresAt));
             policy.onPut(key);
+
         } finally {
             lock.unlockWrite(stamp);
         }
@@ -45,9 +47,7 @@ public class CacheSegment<K, V> {
         // We need a WRITE lock because 'policy.onAccess(key)' modifies the
         // Doubly Linked List (changing 'prev' and 'next' pointers).
         long stamp = lock.writeLock();
-
         try {
-            // Read the value
             CacheEntry<V> entry = map.get(key);
 
             if (entry == null || entry.isExpired()) {
@@ -64,7 +64,7 @@ public class CacheSegment<K, V> {
 
             return Optional.of(entry.value());
         } finally {
-            lock.unlockRead(stamp);
+            lock.unlockWrite(stamp);
         }
     }
 
@@ -79,6 +79,7 @@ public class CacheSegment<K, V> {
     }
 
     public int size() {
+        // Optimistic Read is perfectly fine for 'size' as it is Read-Only
         long stamp = lock.tryOptimisticRead();
         int size = map.size();
         if (!lock.validate(stamp)) {
