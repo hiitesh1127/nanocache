@@ -1,5 +1,8 @@
 package com.nanocache.core;
 
+import com.nanocache.policy.EvictionPolicy;
+import com.nanocache.policy.LRUPolicy;
+
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -9,54 +12,67 @@ public class CacheSegment<K, V> {
 
     // We use a standard HashMap because we are managing the locks ourselves
     private final Map<K, CacheEntry<V>> map = new HashMap<>();
+    private final EvictionPolicy<K> policy = new LRUPolicy<>();
+    private final int capacity;
 
     // Advanced Concurrency: StampedLock for optimistic locking
     private final StampedLock lock = new StampedLock();
 
+    public CacheSegment(int capacity) {
+        this.capacity = capacity;
+    }
+
     public void put(K key, V value, long ttlMillis) {
         long stamp = lock.writeLock(); // Exclusive Lock (Blocks everyone)
         try {
+            if(map.size() >= capacity && !map.containsKey(key)) {
+                K victim = policy.evict();
+                if (victim != null) {
+                    map.remove(victim); // Remove from storage
+                    // System.out.println("Evicted: " + victim);
+                }
+            }
             long expiresAt = System.currentTimeMillis() + ttlMillis;
             map.put(key, new CacheEntry<>(value, expiresAt));
+            policy.onPut(key);
         } finally {
             lock.unlockWrite(stamp);
         }
     }
 
     public Optional<V> get(K key) {
-        // --- OPTIMISTIC READ START ---
-        // Try to get a stamp without actually locking (very fast)
-        long stamp = lock.tryOptimisticRead();
+        // Acquire Write Lock
+        // We need a WRITE lock because 'policy.onAccess(key)' modifies the
+        // Doubly Linked List (changing 'prev' and 'next' pointers).
+        long stamp = lock.writeLock();
 
-        // Read the value
-        CacheEntry<V> entry = map.get(key);
+        try {
+            // Read the value
+            CacheEntry<V> entry = map.get(key);
 
-        // Check: Did a write happen while I was reading?
-        if (!lock.validate(stamp)) {
-            // Yes, a write happened. Optimistic read failed.
-            // Fallback to a pessimisic Read Lock (slower, blocks writers)
-            stamp = lock.readLock();
-            try {
-                entry = map.get(key);
-            } finally {
-                lock.unlockRead(stamp);
+            if (entry == null || entry.isExpired()) {
+                if (entry != null) {
+                    // Lazy Cleanup: If we found it but it's expired, remove it now.
+                    map.remove(key);
+                    policy.onRemove(key);
+                }
+                return Optional.empty();
             }
-        }
-        // --- OPTIMISTIC READ END ---
 
-        if (entry == null || entry.isExpired()) {
-            // Lazy expiration: if we find it expired during get, we can return empty.
-            // (Ideally, we trigger a background cleanup here or return null)
-            return Optional.empty();
-        }
+            // This moves the accessed key to the Head of the eviction list.
+            policy.onAccess(key);
 
-        return Optional.of(entry.value());
+            return Optional.of(entry.value());
+        } finally {
+            lock.unlockRead(stamp);
+        }
     }
 
     public void remove(K key) {
         long stamp = lock.writeLock();
         try {
             map.remove(key);
+            policy.onRemove(key);
         } finally {
             lock.unlockWrite(stamp);
         }

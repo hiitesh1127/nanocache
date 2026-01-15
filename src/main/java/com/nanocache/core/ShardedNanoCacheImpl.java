@@ -9,20 +9,20 @@ public class ShardedNanoCacheImpl<K, V> implements NanoCache<K, V> {
     private final int segmentMask;
 
     @SuppressWarnings("unchecked")
-    public ShardedNanoCacheImpl(int capacity, int concurrencyLevel) {
-        // Concurrency Level = Number of Segments (must be power of 2 for bitwise optimization)
-        // e.g., if concurrencyLevel is 16, we create 16 segments.
+    public ShardedNanoCacheImpl(int totalCapacity, int concurrencyLevel) {
+        // Calculate Segment Count (Power of 2)
         int numSegments = findNextPowerOfTwo(concurrencyLevel);
-
-        // The mask is used to calculate the index.
-        // If numSegments is 16 (10000 binary), mask is 15 (01111 binary).
         this.segmentMask = numSegments - 1;
-
         this.segments = new CacheSegment[numSegments];
+
+        // Calculate Capacity PER Segment
+        // If total is 1024 and segments are 16, each segment gets 64.
+        // We use Math.ceil to ensure we don't under-allocate if division isn't perfect.
+        int segmentCapacity = (int) Math.ceil((double) totalCapacity / numSegments);
 
         // Initialize segments
         for (int i = 0; i < numSegments; i++) {
-            this.segments[i] = new CacheSegment<>();
+            this.segments[i] = new CacheSegment<>(segmentCapacity);
         }
     }
 
